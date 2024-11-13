@@ -1,0 +1,458 @@
+//@version=5
+strategy("Price Action", process_orders_on_close=true, overlay=true, calc_on_every_tick=true)
+
+// Higher Timeframe Inputs
+htfOn = input.bool(false, title="Higher Timeframe Check", group="Higher Timeframe Settings")
+htfEMA = input.int(defval = 50, title = "Higher Timeframe EMA", minval = 1, group="Higher Timeframe Settings")
+higherTimeframe = input.timeframe(defval="D", title="Higher Timeframe", group="Higher Timeframe Settings")
+
+// Correlated Asset 1 Inputs
+correlatedAssetOn = input.bool(false, title="Enable Correlated Asset 1", group="Correlated Asset 1 Settings")
+invertAssetOn = input.bool(false, title="Invert Correlated Asset 1", group="Correlated Asset 1 Settings")
+correlatedAsset = input.symbol("AAPL", "Select Correlated Asset 1", group="Correlated Asset 1 Settings")
+htfOn_correlated = input.bool(false, title="Higher Timeframe Check - Correlated Asset 1", group="Correlated Asset 1 Settings")
+higherTimeframe_correlated = input.timeframe(defval="D", title="Higher Timeframe - Correlated Asset 1", group="Correlated Asset 1 Settings")
+htfEMA_correlated = input.int(defval = 50, title = "Higher Timeframe EMA Correlated 1", minval = 1, group="Correlated Asset 1 Settings")
+
+// Correlated Asset 2 Inputs
+correlatedAssetOn2 = input.bool(false, title="Enable Correlated Asset 2", group="Correlated Asset 2 Settings")
+invertAssetOn2 = input.bool(false, title="Invert Correlated Asset 2", group="Correlated Asset 2 Settings")
+correlatedAsset2 = input.symbol("AAPL", "Select Correlated Asset 2", group="Correlated Asset 2 Settings")
+htfOn_correlated2 = input.bool(false, title="Higher Timeframe Check - Correlated Asset 2", group="Correlated Asset 2 Settings")
+higherTimeframe_correlated2 = input.timeframe(defval="D", title="Higher Timeframe - Correlated Asset 2", group="Correlated Asset 2 Settings")
+htfEMA_correlated2 = input.int(defval = 50, title = "Higher Timeframe EMA Correlated 2", minval = 1, group="Correlated Asset 2 Settings")
+
+// Risk/Reward Inputs
+riskRewardRatio = input.float(2.0, title="Risk/Reward Ratio for Take Profit", minval=0.1, step=0.1, group="Risk Management")
+breakEvenOn = input.bool(defval=true, title="Break Even Enabled", group="Risk Management")
+moveToBreakEvenRR = input.float(1.0, title="Move Stop to Break Even at R:R", minval=0.0, step=0.1, group="Risk Management")
+
+// Risk Management Inputs
+riskMode = input.string(title="Risk Mode", defval="Fixed Dollar Amount", options=["Percentage of Equity", "Fixed Dollar Amount"], group="Risk Management")
+riskPercentage = input.float(title="Risk Percentage", defval=1.0, minval=0.1, step=0.1, group="Risk Management")  // For 'Percentage of Equity' mode
+fixedDollarRisk = input.float(title="Fixed Dollar Amount to Risk", defval=100, minval=1, group="Risk Management")  // For 'Fixed Dollar Amount' mode
+
+// Trade Settings
+tradeMode = input.string("Mode 1", title="Trade Mode", options=["Mode 1", "Mode 2"], group="Trade Settings")
+tradeDirection = input.string("All", title="Trade Direction", options=["Buys Only", "Sells Only", "All"], group="Trade Settings")
+allowMultipleTrades = input.bool(true, title="Allow Multiple Trades", group="Trade Settings")
+
+// EMA Settings
+len_fast = input.int(defval=5, title="Length of Fast EMA", minval=1, group="EMA Settings")
+src_fast = input.source(close, title="Source of Fast EMA", group="EMA Settings")
+offset_fast = input.int(title="Offset of Fast EMA", defval=0, minval=-500, maxval=500, group="EMA Settings")
+fractalOffset = input.int(defval=1, title="Fractal Offset", group="EMA Settings")
+
+len_slow = input.int(defval=13, title="Length of Slow EMA", minval=1, group="EMA Settings")
+src_slow = input.source(close, title="Source of Slow EMA", group="EMA Settings")
+offset_slow = input.int(title="Offset of Slow EMA", defval=0, minval=-500, maxval=500, group="EMA Settings")
+
+// Volume Filter Settings
+volumeFilterOn = input.bool(false, "Volume Filter 1", group="Volume Filters")
+volumeThreshold = input.float(title = "Volume Threshold Percentage 1", defval = 100, minval=0.1, step=0.1, group="Volume Filters")
+volumeFilterOn2 = input.bool(false, "Volume Filter 2", group="Volume Filters")
+volumeThreshold2 = input.float(title = "Volume Threshold Percentage 2", defval = 100, minval=100, step=0.1, group="Volume Filters")
+
+// Lookback Period
+lookbackPeriod = input.int(5, title="Lookback Period", group="Analysis Settings")
+
+// Time Filter Inputs
+timeFilterOn = input.bool(false, "Enable Time Filtering", group="Time Filtering")
+session1On = input.bool(false, "Enable Trading Time Period 1", group="Time Filtering")
+session1 = input.session("0800-1000:1234567", "Trading Time Period 1 America/New_York", group="Time Filtering")
+
+session2On = input.bool(false, "Enable Trading Time Period 2", group="Time Filtering")
+session2 = input.session("1200-1400:1234567", "Trading Time Period 2 America/New_York", group="Time Filtering")
+
+session3On = input.bool(false, "Enable Trading Time Period 3", group="Time Filtering")
+session3 = input.session("1600-1800:1234567", "Trading Time Period 3 America/New_York", group="Time Filtering")
+
+// Function to check if the current time is within a session
+is_in_session(sess) =>
+    not na(time(timeframe.period, sess, "America/New_York"))
+
+// Check if current time is within any of the enabled time periods
+bool tradeTime = true  // Default to true, meaning trade all the time unless a time filter is enabled
+bool sessionTime = true
+if(timeFilterOn)
+    if (session1On or session2On or session3On)
+        sessionTime := (session1On and is_in_session(session1)) or (session2On and is_in_session(session2)) or (session3On and is_in_session(session3))
+
+// Plot background color based on tradeTime status and timeFilterOn toggle
+bgcolor(sessionTime and timeFilterOn ? color.new(color.white, 90) : na)
+
+// Determining the Trade Mode based on user selection
+bool mode1 = false
+bool mode2 = false
+
+if  (tradeMode == "Mode 1")
+    mode1 := true
+    mode2 := false
+else if (tradeMode == "Mode 2")
+    mode1 := false
+    mode2 := true
+
+
+
+// Higher timeframe EMAs
+htf_ema = htfOn ? request.security(syminfo.tickerid, higherTimeframe, ta.ema(close, htfEMA)) : na
+
+var bool htf_bullish = na
+var bool htf_bearish = na
+
+if htf_ema > htf_ema[1]
+    htf_bullish := true
+    htf_bearish := false
+else if htf_bullish and htf_ema == htf_ema[1]
+    htf_bullish := true
+    htf_bearish := false
+else if htf_ema < htf_ema[1]
+    htf_bullish := false
+    htf_bearish := true
+else if htf_bearish and htf_ema == htf_ema[1]
+    htf_bullish := false
+    htf_bearish := true
+
+// Calculate EMAs
+out_fast = ta.ema(src_fast, len_fast)
+out_slow = ta.ema(src_slow, len_slow)
+
+bullish = out_fast > out_slow
+bearish = out_fast < out_slow
+
+buyClose = open >= out_slow and close < out_slow
+sellClose = open <= out_slow and close > out_slow
+
+out_fast_correlated = ta.ema(request.security(correlatedAsset, timeframe.period, close), len_fast)
+out_slow_correlated = ta.ema(request.security(correlatedAsset, timeframe.period, close), len_slow)
+bullish_correlated = out_fast_correlated > out_slow_correlated
+bearish_correlated = out_fast_correlated < out_slow_correlated
+htf_ema_correlated = htfOn_correlated ? request.security(correlatedAsset, higherTimeframe_correlated, ta.ema(close, htfEMA_correlated)) : na
+var bool htf_bullish_correlated = na
+var bool htf_bearish_correlated = na
+
+if htf_ema_correlated > htf_ema_correlated[1]
+    htf_bullish_correlated := true
+    htf_bearish_correlated := false
+else if htf_bullish_correlated and htf_ema_correlated == htf_ema_correlated[1]
+    htf_bullish_correlated := true
+    htf_bearish_correlated := false
+else if htf_ema_correlated < htf_ema_correlated[1]
+    htf_bullish_correlated := false
+    htf_bearish_correlated := true
+else if htf_bearish_correlated and htf_ema_correlated == htf_ema_correlated[1]
+    htf_bullish_correlated := false
+    htf_bearish_correlated := true
+
+out_fast_correlated2 = ta.ema(request.security(correlatedAsset2, timeframe.period, close), len_fast)
+out_slow_correlated2 = ta.ema(request.security(correlatedAsset2, timeframe.period, close), len_slow)
+bullish_correlated2 = out_fast_correlated2 > out_slow_correlated2
+bearish_correlated2 = out_fast_correlated2 < out_slow_correlated2
+htf_ema_correlated2 = htfOn_correlated2 ? request.security(correlatedAsset2, higherTimeframe_correlated2, ta.ema(close, htfEMA_correlated2)) : na
+
+var bool htf_bullish_correlated2 = na
+var bool htf_bearish_correlated2 = na
+
+if htf_ema_correlated2 > htf_ema_correlated2[1]
+    htf_bullish_correlated2 := true
+    htf_bearish_correlated2 := false
+else if htf_bullish_correlated2 and htf_ema_correlated2 == htf_ema_correlated2[1]
+    htf_bullish_correlated2 := true
+    htf_bearish_correlated2 := false
+else if htf_ema_correlated2 < htf_ema_correlated2[1]
+    htf_bullish_correlated2 := false
+    htf_bearish_correlated2 := true
+else if htf_bearish_correlated2 and htf_ema_correlated2 == htf_ema_correlated2[1]
+    htf_bullish_correlated2 := false
+    htf_bearish_correlated2 := true
+
+// Plot EMAs
+plot(not htfOn ? out_fast : na, color=bearish ? color.red : color.green, linewidth=2, title="Fast EMA", offset=offset_fast)
+plot(not htfOn ? out_slow : na, color=bearish ? color.red : color.green, linewidth=2, title="Slow EMA", offset=offset_slow)
+
+plot(htfOn ? out_fast : na, color=htf_bearish ? color.red : color.green, linewidth=2, title="Fast EMA", offset=offset_fast)
+plot(htfOn ? out_slow : na, color=htf_bearish ? color.red : color.green, linewidth=2, title="Slow EMA", offset=offset_slow)
+
+plot(htf_ema, color=htf_bearish ? #790000 : #006503, linewidth=2, title="HTF EMA")
+
+
+// Determine if buys and sells are enabled based on user selection and conditions
+bool buysOn = false
+bool sellsOn = false
+
+// Check conditions for enabling buy and sell signals
+bool htfConditionBuy = htfOn ? htf_bullish : true
+bool htfConditionSell = htfOn ? htf_bearish : true
+
+// Correlated Asset 1 Conditions
+bool correlatedConditionBuy = correlatedAssetOn ? (invertAssetOn ? bearish_correlated : bullish_correlated) : true
+bool correlatedConditionSell = correlatedAssetOn ? (invertAssetOn ? bullish_correlated : bearish_correlated) : true
+bool htfCorrelatedConditionBuy = (htfOn_correlated and correlatedAssetOn) ? (invertAssetOn ? htf_bearish_correlated : htf_bullish_correlated) : true
+bool htfCorrelatedConditionSell = (htfOn_correlated and correlatedAssetOn) ? (invertAssetOn ? htf_bullish_correlated : htf_bearish_correlated) : true
+
+// Correlated Asset 2 Conditions
+bool correlatedConditionBuy2 = correlatedAssetOn2 ? (invertAssetOn2 ? bearish_correlated2 : bullish_correlated2) : true
+bool correlatedConditionSell2 = correlatedAssetOn2 ? (invertAssetOn2 ? bullish_correlated2 : bearish_correlated2) : true
+bool htfCorrelatedConditionBuy2 = (htfOn_correlated2 and correlatedAssetOn2) ? (invertAssetOn2 ? htf_bearish_correlated2 : htf_bullish_correlated2) : true
+bool htfCorrelatedConditionSell2 = (htfOn_correlated2 and correlatedAssetOn2) ? (invertAssetOn2 ? htf_bullish_correlated2 : htf_bearish_correlated2) : true
+
+// Final Buy and Sell Conditions
+if (tradeDirection == "Buys Only" or tradeDirection == "All")
+    buysOn := htfConditionBuy and correlatedConditionBuy and htfCorrelatedConditionBuy and correlatedConditionBuy2 and htfCorrelatedConditionBuy2
+
+if (tradeDirection == "Sells Only" or tradeDirection == "All")
+    sellsOn := htfConditionSell and correlatedConditionSell and htfCorrelatedConditionSell and correlatedConditionSell2 and htfCorrelatedConditionSell2
+
+// Function to check if a candle is bullish or bearish
+isBullish(candleClose, candleOpen) =>
+    candleClose > candleOpen
+isBearish(candleClose, candleOpen) =>
+    candleClose < candleOpen
+
+// Function to check if RSI values are increasing (bullish) or decreasing (bearish) over the lookback period
+check_rsi_direction(rsiMA, lookbackPeriod) =>
+    bullish = true
+    bearish = true
+    // Loop over the last 'lookbackPeriod' bars
+    for i = 2 to lookbackPeriod
+        if rsiMA[i] > rsiMA[i - 1]
+            bullish := false
+        if rsiMA[i] < rsiMA[i - 1]
+            bearish := false
+    [bullish, bearish]
+
+// Fetch data using the chart's timeframe
+[htfOpen, htfHigh, htfLow, htfClose, htfVolume, htfTime] = request.security(syminfo.tickerid, timeframe.period, [open, high, low, close, volume, time])
+
+
+
+// Variables for buy and sell order parameters
+var float stopLoss = na
+var float tp = na
+var float positionSize = na
+var float riskPerUnit = na
+var float riskAmount = na
+var float buyEntry = na
+var float sellEntry = na
+
+// Arrays to store multiple trades data
+var orderIDArray = array.new_string()
+var entryPriceArray = array.new_float()
+var stopLossArray = array.new_float()
+var takeProfitArray = array.new_float()
+var riskPerUnitArray = array.new_float()
+var tradeDirectionArray = array.new_string()  // "long" or "short"
+var barIndexArray = array.new_int()
+
+// Plot lines for entries, stop losses, and take profits
+var line[] entryLines = array.new_line()
+var line[] stopLossLines = array.new_line()
+var line[] tpLines = array.new_line()
+
+// Main logic
+if barstate.isnew
+    // Define the previous and current candles
+    prevHigh = htfHigh[1]
+    prevLow = htfLow[1]
+    prevClose = htfClose[1]
+    prevOpen = htfOpen[1]
+
+    currHigh = htfHigh[0]
+    currLow = htfLow[0]
+    currClose = htfClose[0]
+    currOpen = htfOpen[0]
+
+    // Identify if previous candle is bullish and current candle is bearish
+    bullishCandle_1 = isBullish(prevClose, prevOpen)
+    bullishCandle_0 = isBullish(currClose, currOpen)
+    bearishCandle_1 = isBearish(prevClose, prevOpen)
+    bearishCandle_0 = isBearish(currClose, currOpen)
+
+    // Check if current candle is inside the previous candle
+    insideCandle = (currHigh < prevHigh and currLow > prevLow)
+
+    // Calculate volume filter
+    volPct = (htfVolume[0] / htfVolume[1]) * 100
+    volumeValid = true
+    if (volumeFilterOn and volPct > volumeThreshold)
+        volumeValid := false
+
+    volPct2 = (htfVolume[1] / htfVolume[2]) * 100
+    volumeValid2 = true
+    if (volumeFilterOn2 and volPct2 < volumeThreshold2)
+        volumeValid2 := false
+
+    // RSI Filter Condition
+    rsiCondition = true
+
+    // Buy Entry Condition
+    if (bullishCandle_1 and bearishCandle_0 and insideCandle and buysOn and volumeValid and rsiCondition and tradeTime and volumeValid2)
+        // Only allow a new trade if no position exists or multiple trades are allowed
+        if (allowMultipleTrades or strategy.position_size == 0)
+            // Define buy entry and stop loss
+            buyEntry := mode1 ? currHigh : prevHigh
+            stopLoss := currLow
+
+            // Calculate risk per unit
+            riskPerUnit := buyEntry - stopLoss
+
+            // Ensure risk per unit is positive to avoid division errors
+            if (riskPerUnit > 0)
+                // Calculate take profit level
+                tp := buyEntry + riskPerUnit * riskRewardRatio
+
+                // Calculate the amount to risk per trade
+                riskAmount := (riskMode == "Percentage of Equity") ? strategy.equity * (riskPercentage / 100) : fixedDollarRisk
+
+                // Calculate position size
+                positionSize := math.floor(riskAmount / riskPerUnit)
+
+                // Ensure position size is at least 1
+                if positionSize >= 1
+                    // Generate unique order ID
+                    buyOrderID = "Buy_" + str.tostring(time) + "_" + str.tostring(array.size(orderIDArray) + 1)
+                    // Place the order
+                    strategy.entry(id=buyOrderID, direction=strategy.long, qty=positionSize, stop=buyEntry, comment="Buy Stop")
+                    // Set stop loss and take profit
+                    strategy.exit("Exit_" + buyOrderID, from_entry=buyOrderID, stop=stopLoss, limit=tp)
+                    // Store trade data
+                    array.push(orderIDArray, buyOrderID)
+                    array.push(entryPriceArray, buyEntry)
+                    array.push(stopLossArray, stopLoss)
+                    array.push(takeProfitArray, tp)
+                    array.push(riskPerUnitArray, riskPerUnit)
+                    array.push(tradeDirectionArray, "long")
+                    array.push(barIndexArray, bar_index)
+                    // Plot lines
+                    entryLine = line.new(x1=bar_index, y1=buyEntry, x2=bar_index + 1, y2=buyEntry, color=color.green, width=2)
+                    stopLossLine = line.new(x1=bar_index, y1=stopLoss, x2=bar_index + 1, y2=stopLoss, color=color.red, width=2)
+                    tpLine = line.new(x1=bar_index, y1=tp, x2=bar_index + 1, y2=tp, color=color.blue, width=2)
+                    array.push(entryLines, entryLine)
+                    array.push(stopLossLines, stopLossLine)
+                    array.push(tpLines, tpLine)
+
+    // Sell Entry Condition
+    if (bearishCandle_1 and bullishCandle_0 and insideCandle and sellsOn and volumeValid and rsiCondition and tradeTime and volumeValid2)
+        // Only allow a new trade if no position exists or multiple trades are allowed
+        if (allowMultipleTrades or strategy.position_size == 0)
+            // Define sell entry and stop loss
+            sellEntry := mode1 ? currLow : prevLow
+            stopLoss  := currHigh
+
+            // Calculate risk per unit
+            riskPerUnit := stopLoss - sellEntry
+
+            // Ensure risk per unit is positive to avoid division errors
+            if (riskPerUnit > 0)
+                // Calculate take profit level
+                tp := sellEntry - riskPerUnit * riskRewardRatio
+
+                // Calculate the amount to risk per trade
+                riskAmount := (riskMode == "Percentage of Equity") ? strategy.equity * (riskPercentage / 100) : fixedDollarRisk
+
+                // Calculate position size
+                positionSize := math.floor(riskAmount / riskPerUnit)
+
+                // Ensure position size is at least 1
+                if positionSize >= 1
+                    // Generate unique order ID
+                    sellOrderID = "Sell_" + str.tostring(time) + "_" + str.tostring(array.size(orderIDArray) + 1)
+                    // Place the order
+                    strategy.entry(id=sellOrderID, direction=strategy.short, qty=positionSize, stop=sellEntry, comment="Sell Stop")
+                    // Set stop loss and take profit
+                    strategy.exit("Exit_" + sellOrderID, from_entry=sellOrderID, stop=stopLoss, limit=tp)
+                    // Store trade data
+                    array.push(orderIDArray, sellOrderID)
+                    array.push(entryPriceArray, sellEntry)
+                    array.push(stopLossArray, stopLoss)
+                    array.push(takeProfitArray, tp)
+                    array.push(riskPerUnitArray, riskPerUnit)
+                    array.push(tradeDirectionArray, "short")
+                    array.push(barIndexArray, bar_index)
+                    // Plot lines
+                    entryLine = line.new(x1=bar_index, y1=sellEntry, x2=bar_index + 1, y2=sellEntry, color=color.green, width=2)
+                    stopLossLine = line.new(x1=bar_index, y1=stopLoss, x2=bar_index + 1, y2=stopLoss, color=color.red, width=2)
+                    tpLine = line.new(x1=bar_index, y1=tp, x2=bar_index + 1, y2=tp, color=color.blue, width=2)
+                    array.push(entryLines, entryLine)
+                    array.push(stopLossLines, stopLossLine)
+                    array.push(tpLines, tpLine)
+
+// Manage Positions
+if barstate.isconfirmed and breakEvenOn
+    // Only proceed if there are trades to manage
+    if array.size(orderIDArray) > 0
+        // Array to collect indices of trades to remove
+        var int[] indicesToRemove = array.new_int()
+
+        // Loop through all stored trades
+        for i = 0 to array.size(orderIDArray) - 1
+            orderID = array.get(orderIDArray, i)
+            entryPrice = array.get(entryPriceArray, i)
+            currStopLoss = array.get(stopLossArray, i)
+            currTP = array.get(takeProfitArray, i)
+            currRiskPerUnit = array.get(riskPerUnitArray, i)
+            direction = array.get(tradeDirectionArray, i)
+            orderBarIndex = array.get(barIndexArray, i)
+
+            // Check if the order has been filled
+            tradeFound = false
+            for tradeIndex = 0 to strategy.opentrades - 1
+                tradeID = strategy.opentrades.entry_id(tradeIndex)
+                if tradeID == orderID
+                    tradeFound := true
+                    break
+
+            // If trade is not found in opentrades and was placed more than one bar ago, cancel it
+            if not tradeFound
+                if (bar_index - orderBarIndex) >= 1
+                    // Cancel the unfilled order
+                    strategy.cancel(id=orderID)
+                    // Mark index for removal
+                    array.push(indicesToRemove, i)
+            else
+                // Move stop loss to break even when the price reaches the set risk/reward level
+                if moveToBreakEvenRR > 0
+                    if direction == "long"
+                        slSize = currRiskPerUnit
+                        if (currStopLoss < entryPrice and high >= (entryPrice + slSize * moveToBreakEvenRR))
+                            currStopLoss := entryPrice  // Move stop to break even
+                            // Reissue the exit with the new stop loss
+                            strategy.exit("Exit_" + orderID, from_entry=orderID, stop=currStopLoss, limit=currTP)
+                            // Update stop loss in the array
+                            array.set(stopLossArray, i, currStopLoss)
+                            // Update stop loss line
+                            line.set_y1(array.get(stopLossLines, i), currStopLoss)
+                            line.set_y2(array.get(stopLossLines, i), currStopLoss)
+                    else if direction == "short"
+                        slSize = currRiskPerUnit
+                        if (currStopLoss > entryPrice and low <= (entryPrice - slSize * moveToBreakEvenRR))
+                            currStopLoss := entryPrice  // Move stop to break even
+                            // Reissue the exit with the new stop loss
+                            strategy.exit("Exit_" + orderID, from_entry=orderID, stop=currStopLoss, limit=currTP)
+                            // Update stop loss in the array
+                            array.set(stopLossArray, i, currStopLoss)
+                            // Update stop loss line
+                            line.set_y1(array.get(stopLossLines, i), currStopLoss)
+                            line.set_y2(array.get(stopLossLines, i), currStopLoss)
+
+        // Remove trades marked for deletion in reverse order
+        if array.size(indicesToRemove) > 0
+            for idx = array.size(indicesToRemove) - 1 to 0 by 1
+                i = array.get(indicesToRemove, idx)
+                array.remove(orderIDArray, i)
+                array.remove(entryPriceArray, i)
+                array.remove(stopLossArray, i)
+                array.remove(takeProfitArray, i)
+                array.remove(riskPerUnitArray, i)
+                array.remove(tradeDirectionArray, i)
+                array.remove(barIndexArray, i)
+                // Delete the lines
+                line.delete(array.get(entryLines, i))
+                line.delete(array.get(stopLossLines, i))
+                line.delete(array.get(tpLines, i))
+                array.remove(entryLines, i)
+                array.remove(stopLossLines, i)
+                array.remove(tpLines, i)
+
+            // Clear the indicesToRemove array for the next iteration
+            array.clear(indicesToRemove)
